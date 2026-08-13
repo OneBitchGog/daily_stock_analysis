@@ -304,6 +304,60 @@ def aggregate_concepts(wc_df, topn=10):
     return [(c, cnt, reps[c]) for c, cnt in counts.most_common(topn)]
 
 
+# 大分类 → 小分类（概念关键词）映射，用于给股票标注所属行业分类
+SECTOR_MAP = {
+    "科技": ["芯片", "半导体", "存储", "算力", "人工智能", "AI", "软件", "云计算",
+             "光模块", "通信", "5G", "数据中心", "服务器", "信创", "操作系统",
+             "智能驾驶", "智能汽车", "车联网", "数据要素", "数字经济", "华为"],
+    "医药": ["创新药", "CRO", "细胞免疫", "医疗器械", "中药", "疫苗", "生物医药",
+             "基因", "减肥药", "流感", "肝炎", "医疗", "脑机接口", "仿制药"],
+    "新能源": ["光伏", "锂电", "储能", "风电", "氢能", "电池", "充电桩", "新能源汽车",
+               "钠离子", "固态电池"],
+    "消费": ["白酒", "食品", "家电", "零售", "旅游", "免税", "饮料", "乳品",
+             "服装", "美妆", "宠物", "预制菜", "电商"],
+    "金融": ["银行", "券商", "保险", "互联网金融", "数字货币", "期货", "参股金融"],
+    "周期": ["钢铁", "煤炭", "有色", "化工", "石油", "水泥", "稀土", "小金属",
+             "磷化工", "氟化工", "贵金属"],
+    "军工": ["军工", "国防", "航天", "卫星", "北斗", "航母", "无人机"],
+    "汽车": ["汽车", "新能源车", "零部件", "汽车电子", "轮胎"],
+    "机器人": ["机器人", "减速器", "伺服", "执行器", "人形机器人", "工业母机"],
+    "传媒": ["传媒", "游戏", "影视", "文化", "短剧", "AIGC", "元宇宙", "IP"],
+    "地产建筑": ["房地产", "建材", "建筑", "基建", "装配式建筑"],
+    "农业": ["农业", "养殖", "种业", "农产品", "化肥"],
+    "电力": ["电力", "核电", "特高压", "电网", "虚拟电厂"],
+    "环保": ["环保", "污水处理", "固废", "碳中和"],
+}
+
+
+def classify_stock(concepts_str):
+    """从股票所属概念串中提取 大分类（含小分类），如 ['科技(芯片、算力、AI应用)']"""
+    concepts = [c.strip() for c in str(concepts_str).split(";") if c.strip()]
+    out = []
+    for big, smalls in SECTOR_MAP.items():
+        matched = [c for c in concepts if any(s in c for s in smalls)]
+        if matched:
+            out.append(f"{big}({'、'.join(matched[:3])})")
+    return out
+
+
+def fetch_individual_flow():
+    """同花顺全市场个股资金流（含流入/流出/净额，单位亿元）"""
+    import akshare as ak
+    df = ak.stock_fund_flow_individual(symbol="即时")
+    if df is None or df.empty or "净额" not in df.columns:
+        raise RuntimeError("个股资金流为空")
+    return df
+
+
+def fetch_industry_flow():
+    """同花顺行业资金流（含流入/流出/净额，单位亿元）"""
+    import akshare as ak
+    df = ak.stock_fund_flow_industry(symbol="即时")
+    if df is None or df.empty or "净额" not in df.columns:
+        raise RuntimeError("行业资金流为空")
+    return df
+
+
 def fmt_pct(x):
     try:
         return f"{float(x):.2f}%"
@@ -335,7 +389,23 @@ def fmt_billion(x):
         return "-"
 
 
-def build_markdown(topn, tencent=None, ind=None, lhb=None, zt=None, prediction=None, signals=None, concepts=None):
+def parse_money_str(s):
+    """解析同花顺资金流字符串（'1.39亿'/'2909.03万'/纯数字元）→ 亿元数值"""
+    s = str(s).strip().replace("+", "")
+    if not s or s in ("-", "nan", "None", "NaN"):
+        return 0.0
+    if s.endswith("亿"):
+        return float(s[:-1])
+    if s.endswith("万"):
+        return float(s[:-1]) / 1e4
+    try:
+        return float(s) / 1e8  # 纯数字按元
+    except ValueError:
+        return 0.0
+
+
+def build_markdown(topn, tencent=None, ind=None, lhb=None, zt=None, prediction=None,
+                   signals=None, concepts=None, ind_flow=None, flow_map=None, concept_map=None):
     lines = []
     lines.append("📊 **每日市场榜单**")
     lines.append(f"🕐 {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M')}")
@@ -402,6 +472,32 @@ def build_markdown(topn, tencent=None, ind=None, lhb=None, zt=None, prediction=N
         except Exception as e:
             log(f"板块榜生成失败: {e}")
 
+    # 4.4 行业资金流（净流入 / 净流出）
+    if ind_flow is not None and {"行业", "净额"}.issubset(ind_flow.columns):
+        try:
+            df = ind_flow.copy()
+            df["净额"] = pd.to_numeric(df["净额"], errors="coerce").fillna(0)
+            inflow = df.nlargest(topn, "净额")
+            lines.append(f"💰 **行业资金净流入 TOP{topn}**")
+            lines.append("行业 | 净流入 | 领涨股")
+            lines.append("-" * 40)
+            for _, r in inflow.iterrows():
+                lines.append(
+                    f"{r['行业']} | {fmt_billion(r['净额'])} | {r.get('领涨股', '-')}"
+                )
+            lines.append("")
+            outflow = df.nsmallest(topn, "净额")
+            lines.append(f"💸 **行业资金净流出 TOP{topn}**")
+            lines.append("行业 | 净流出 | 领涨股")
+            lines.append("-" * 40)
+            for _, r in outflow.iterrows():
+                lines.append(
+                    f"{r['行业']} | {fmt_billion(r['净额'])} | {r.get('领涨股', '-')}"
+                )
+            lines.append("")
+        except Exception as e:
+            log(f"行业资金流生成失败: {e}")
+
     # 4.5 热门概念（问财实验性）
     if concepts:
         lines.append(f"🧪 **今日热门概念 TOP{min(topn, len(concepts))}**（强势股涉及）")
@@ -453,15 +549,21 @@ def build_markdown(topn, tencent=None, ind=None, lhb=None, zt=None, prediction=N
         except Exception as e:
             log(f"涨停池生成失败: {e}")
 
-    # 6.5 策略信号（热门股池：涨停池 + 涨幅榜前20）
+    # 6.5 策略信号（热门股池：涨停池 + 涨幅榜前20），附分类与主力资金
     if signals:
         lines.append(f"🧠 **今日热门股策略信号**")
-        lines.append("代码 | 名称 | 信号")
-        lines.append("-" * 40)
+        lines.append("代码 | 名称 | 信号 | 分类 | 主力净额")
+        lines.append("-" * 60)
         for code, name, sigs in signals:
-            lines.append(f"{code} | {name} | {'、'.join(sigs)}")
+            net = "-"
+            if flow_map and code in flow_map:
+                net = f"{parse_money_str(flow_map[code].get('净额')):.2f}亿"
+            cls = "、".join(classify_stock(concept_map.get(code, ""))) if concept_map else ""
+            lines.append(
+                f"{code} | {name} | {'、'.join(sigs)} | {cls[:22] or '—'} | {net}"
+            )
         lines.append("")
-        lines.append("（扫描范围：今日涨停池 + 涨幅榜前20；仅供参考）")
+        lines.append("（扫描范围：今日涨停池 + 涨幅榜前20；分类/资金仅供参考）")
         lines.append("")
 
     # 7. 明日板块预测
@@ -584,14 +686,34 @@ def main():
 
     prediction = predict_sectors(ind, api_key, model, topn=15)
 
-    # 问财热门概念（实验性，失败不影响主流程）
+    # 问财热门概念（实验性，失败不影响主流程）；同时构建 股票代码→所属概念 映射
     concepts = []
+    concept_map = {}
+    wc = None
     try:
         wc = fetch_wencai_concepts()
         concepts = aggregate_concepts(wc, topn)
-        log(f"问财热门概念聚合完成: {len(concepts)} 个")
+        for _, r in wc.iterrows():
+            code = norm_code(r.get("code", r.get("股票代码", ""))).zfill(6)
+            concept_map[code] = str(r.get("所属概念", ""))
+        log(f"问财热门概念聚合完成: {len(concepts)} 个，概念映射 {len(concept_map)} 只")
     except Exception as e:
         log(f"问财概念获取失败(实验性，跳过): {e}")
+
+    # 同花顺资金流：行业资金流 + 个股资金流（单位亿元）
+    ind_flow = None
+    flow_map = {}
+    try:
+        ind_flow = fetch_industry_flow()
+        individual_flow = fetch_individual_flow()
+        for _, r in individual_flow.iterrows():
+            code = norm_code(r.get("股票代码", "")).zfill(6)
+            flow_map[code] = {
+                "流入": r.get("流入资金"), "流出": r.get("流出资金"), "净额": r.get("净额"),
+            }
+        log(f"资金流获取成功: 行业 {len(ind_flow)} 条, 个股 {len(flow_map)} 条")
+    except Exception as e:
+        log(f"资金流获取失败: {e}")
 
     # 策略信号扫描（热门股池），耗时约 1-2 分钟
     signals = []
@@ -601,7 +723,10 @@ def main():
     except Exception as e:
         log(f"策略信号扫描失败: {e}")
 
-    text = build_markdown(topn, tencent, ind, lhb, zt, prediction, signals, concepts)
+    text = build_markdown(
+        topn, tencent, ind, lhb, zt, prediction,
+        signals, concepts, ind_flow, flow_map, concept_map,
+    )
     print(text)
     print("=" * 60)
 
