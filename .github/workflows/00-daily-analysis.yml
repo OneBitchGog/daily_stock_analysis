@@ -564,6 +564,17 @@ jobs:
             python main.py $FORCE_RUN_ARG
           fi
 
+      - name: 市场榜单与明日板块预测
+        # 附加功能，失败不影响主分析
+        continue-on-error: true
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
+          DEEPSEEK_API_MODEL: ${{ vars.DEEPSEEK_API_MODEL || 'deepseek-chat' }}
+          RANK_TOPN: ${{ vars.RANK_TOPN || '10' }}
+        run: |
+          python scripts/market_rankings.py
+
       - name: 上传分析报告
         uses: actions/upload-artifact@v6
         if: always()
