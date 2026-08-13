@@ -259,6 +259,51 @@ def scan_signals(zt_df, tencent_df, topn=20, limit=40):
     return results
 
 
+def fetch_wencai_concepts():
+    """问财查询今日涨幅居前股票的所属概念（实验性，约30-60秒，失败重试1次）"""
+    import time as _time
+    import pywencai
+    for attempt in range(2):
+        try:
+            df = pywencai.get(query="今日涨幅居前的股票，所属概念")
+            if df is not None and hasattr(df, "columns"):
+                if "所属概念" in df.columns and "股票简称" in df.columns:
+                    return df
+            log(f"问财第{attempt + 1}次尝试返回异常，重试")
+        except Exception as e:
+            log(f"问财第{attempt + 1}次尝试失败: {e}")
+        if attempt == 0:
+            _time.sleep(3)
+    raise RuntimeError("问财多次尝试均失败")
+
+
+# 通用属性标签（非题材概念），聚合时过滤，避免占榜
+_IGNORE_CONCEPTS = {
+    "融资融券", "转融券标的", "融资标的", "深股通", "沪股通", "港股通",
+    "MSCI中国", "标普道琼斯A股", "富时罗素", "MSCI概念", "证金持股",
+    "QFII重仓", "机构重仓", "央企国资改革", "地方国资改革",
+    "预盈预增", "破净股", "昨日涨停", "昨日连板", "新股与次新股",
+    "注册制次新股", "举牌", "参股银行", "参股保险", "参股券商", "低价股",
+}
+
+
+def aggregate_concepts(wc_df, topn=10):
+    """聚合热门概念：统计强势股涉及的每个题材概念的出现次数与代表股（过滤通用属性标签）"""
+    from collections import Counter, defaultdict
+    counts = Counter()
+    reps = defaultdict(list)
+    for _, r in wc_df.iterrows():
+        name = str(r.get("股票简称", ""))
+        concepts = str(r.get("所属概念", ""))
+        for c in (x.strip() for x in concepts.split(";") if x.strip()):
+            if c in _IGNORE_CONCEPTS:
+                continue
+            counts[c] += 1
+            if len(reps[c]) < 3:
+                reps[c].append(name)
+    return [(c, cnt, reps[c]) for c, cnt in counts.most_common(topn)]
+
+
 def fmt_pct(x):
     try:
         return f"{float(x):.2f}%"
@@ -290,7 +335,7 @@ def fmt_billion(x):
         return "-"
 
 
-def build_markdown(topn, tencent=None, ind=None, lhb=None, zt=None, prediction=None, signals=None):
+def build_markdown(topn, tencent=None, ind=None, lhb=None, zt=None, prediction=None, signals=None, concepts=None):
     lines = []
     lines.append("📊 **每日市场榜单**")
     lines.append(f"🕐 {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M')}")
@@ -356,6 +401,17 @@ def build_markdown(topn, tencent=None, ind=None, lhb=None, zt=None, prediction=N
             lines.append("")
         except Exception as e:
             log(f"板块榜生成失败: {e}")
+
+    # 4.5 热门概念（问财实验性）
+    if concepts:
+        lines.append(f"🧪 **今日热门概念 TOP{min(topn, len(concepts))}**（强势股涉及）")
+        lines.append("概念 | 涉及股数 | 代表股")
+        lines.append("-" * 40)
+        for concept, cnt, reps in concepts:
+            lines.append(f"{concept} | {cnt} | {','.join(reps)}")
+        lines.append("")
+        lines.append("（数据源：问财，实验性）")
+        lines.append("")
 
     # 5. 龙虎榜·机构净买入（机构交易量排行）
     if lhb is not None and "机构买入净额" in lhb.columns:
@@ -528,6 +584,15 @@ def main():
 
     prediction = predict_sectors(ind, api_key, model, topn=15)
 
+    # 问财热门概念（实验性，失败不影响主流程）
+    concepts = []
+    try:
+        wc = fetch_wencai_concepts()
+        concepts = aggregate_concepts(wc, topn)
+        log(f"问财热门概念聚合完成: {len(concepts)} 个")
+    except Exception as e:
+        log(f"问财概念获取失败(实验性，跳过): {e}")
+
     # 策略信号扫描（热门股池），耗时约 1-2 分钟
     signals = []
     try:
@@ -536,7 +601,7 @@ def main():
     except Exception as e:
         log(f"策略信号扫描失败: {e}")
 
-    text = build_markdown(topn, tencent, ind, lhb, zt, prediction, signals)
+    text = build_markdown(topn, tencent, ind, lhb, zt, prediction, signals, concepts)
     print(text)
     print("=" * 60)
 
