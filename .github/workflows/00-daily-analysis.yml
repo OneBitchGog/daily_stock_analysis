@@ -573,6 +573,8 @@ jobs:
           FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
           DEEPSEEK_API_MODEL: ${{ vars.DEEPSEEK_API_MODEL || 'deepseek-chat' }}
           RANK_TOPN: ${{ vars.RANK_TOPN || '10' }}
+          # 自选股（用于入场参考），从 STOCK_LIST 配置读取
+          WATCHLIST: ${{ vars.STOCK_LIST || secrets.STOCK_LIST || env.STOCK_LIST || '' }}
         run: |
           python scripts/market_rankings.py
 

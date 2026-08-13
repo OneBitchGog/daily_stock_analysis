@@ -358,6 +358,31 @@ def fetch_industry_flow():
     return df
 
 
+def calc_entry_support(hist):
+    """计算入场支撑参考：现价下方最近的支撑位(s1)与其下第二支撑(s2)"""
+    close = hist["收盘"]
+    low = hist["最低"]
+    if len(close) < 60 or pd.isna(close.iloc[-1]):
+        return None
+    cur = float(close.iloc[-1])
+    ma20 = close.rolling(20).mean().iloc[-1]
+    ma60 = close.rolling(60).mean().iloc[-1]
+    low20 = float(low.iloc[-20:].min())
+    low60 = float(low.iloc[-60:].min())
+    supports = sorted([s for s in (ma20, ma60, low20, low60) if not pd.isna(s)])
+    if not supports:
+        return None
+    below = [s for s in supports if s < cur]
+    if below:
+        s1 = max(below)                     # 现价下方最近的支撑
+        s2 = min(below) if len(below) > 1 else s1 * 0.95
+    else:
+        s1 = min(supports)                  # 现价已在所有支撑下方
+        s2 = s1 * 0.95
+    return {"cur": cur, "s1": s1, "s2": s2, "ma20": ma20, "ma60": ma60,
+            "low20": low20, "low60": low60}
+
+
 def fmt_pct(x):
     try:
         return f"{float(x):.2f}%"
@@ -405,7 +430,8 @@ def parse_money_str(s):
 
 
 def build_markdown(topn, tencent=None, ind=None, lhb=None, zt=None, prediction=None,
-                   signals=None, concepts=None, ind_flow=None, flow_map=None, concept_map=None):
+                   signals=None, concepts=None, ind_flow=None, flow_map=None, concept_map=None,
+                   entry_refs=None):
     lines = []
     lines.append("📊 **每日市场榜单**")
     lines.append(f"🕐 {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M')}")
@@ -566,6 +592,25 @@ def build_markdown(topn, tencent=None, ind=None, lhb=None, zt=None, prediction=N
         lines.append("（扫描范围：今日涨停池 + 涨幅榜前20；分类/资金仅供参考）")
         lines.append("")
 
+    # 6.8 入场参考（无持仓者可关注）
+    if entry_refs:
+        lines.append("🎯 **候选股入场参考**（无持仓者可关注）")
+        lines.append("代码 | 名称 | 现价 | 建议关注区 | 说明")
+        lines.append("-" * 60)
+        for code, name, sup in entry_refs:
+            zone = f"{sup['s2']:.2f}~{sup['s1']:.2f}"
+            if sup["cur"] > 0 and sup["cur"] <= sup["s1"]:
+                note = "已接近/跌破支撑，谨慎"
+            else:
+                dd = (sup["cur"] - sup["s1"]) / sup["cur"] * 100 if sup["cur"] > 0 else 0
+                note = f"回调约{dd:.0f}%到{sup['s1']:.2f}可分批"
+            lines.append(
+                f"{code} | {name} | {sup['cur']:.2f} | {zone} | {note}"
+            )
+        lines.append("")
+        lines.append("（支撑=现价下方最近支撑位，仅供参考）")
+        lines.append("")
+
     # 7. 明日板块预测
     if prediction:
         lines.append("🔮 **明日关注板块预测（AI）**")
@@ -723,9 +768,39 @@ def main():
     except Exception as e:
         log(f"策略信号扫描失败: {e}")
 
+    # 入场参考：涨停池前5 + 策略信号前5 + 自选股(WATCHLIST)
+    entry_refs = []
+    try:
+        candidates = []
+        if zt is not None and "代码" in zt.columns:
+            for _, r in zt.head(5).iterrows():
+                candidates.append((norm_code(r["代码"]), str(r.get("名称", ""))))
+        for code, name, _ in signals[:5]:
+            candidates.append((code, name))
+        watch = os.environ.get("WATCHLIST", "").strip()
+        if watch:
+            for c in watch.replace("，", ",").split(","):
+                c = c.strip()
+                if c:
+                    wcode = norm_code(c)
+                    candidates.append((wcode, get_stock_name(wcode, zt, tencent)))
+        seen = set()
+        for code, name in candidates:
+            if code in seen:
+                continue
+            seen.add(code)
+            hist = fetch_history(code)
+            sup = calc_entry_support(hist)
+            if sup:
+                entry_refs.append((code, name, sup))
+        log(f"入场参考计算完成: {len(entry_refs)} 只")
+    except Exception as e:
+        log(f"入场参考计算失败: {e}")
+
     text = build_markdown(
         topn, tencent, ind, lhb, zt, prediction,
         signals, concepts, ind_flow, flow_map, concept_map,
+        entry_refs,
     )
     print(text)
     print("=" * 60)
