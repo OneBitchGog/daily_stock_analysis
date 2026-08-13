@@ -30,6 +30,12 @@ def log(msg):
     print(f"[market_rankings] {msg}", flush=True)
 
 
+def today_cn():
+    """北京时间今天的日期（GitHub Actions 服务器是 UTC，需 +8 小时）"""
+    from datetime import datetime, timezone, timedelta
+    return datetime.now(timezone(timedelta(hours=8))).date()
+
+
 def fetch_tencent_spot():
     """腾讯全A行情：code/name/zdf(涨跌幅)/hsl(换手率)/lb(量比)/zljlr(主力净流入,万元)/turnover(成交额,万)"""
     import akshare as ak
@@ -65,7 +71,7 @@ def fetch_industry():
 def fetch_lhb():
     """龙虎榜·机构买卖（近 8 天区间，取最新上榜日）"""
     import akshare as ak
-    end = date.today()
+    end = today_cn()
     start = end - timedelta(days=8)
     df = ak.stock_lhb_jgmmtj_em(
         start_date=start.strftime("%Y%m%d"), end_date=end.strftime("%Y%m%d")
@@ -83,7 +89,7 @@ def fetch_zt_pool():
     """涨停池：自动找最近 7 天内有数据的交易日"""
     import akshare as ak
     for i in range(7):
-        d = (date.today() - timedelta(days=i)).strftime("%Y%m%d")
+        d = (today_cn() - timedelta(days=i)).strftime("%Y%m%d")
         try:
             df = ak.stock_zt_pool_em(date=d)
             if df is not None and not df.empty:
@@ -114,7 +120,7 @@ def fetch_history_yf(symbol):
         ysym = code + ".SZ"
     else:
         raise RuntimeError("yfinance 不支持北交所")
-    start = (date.today() - timedelta(days=550)).strftime("%Y-%m-%d")
+    start = (today_cn() - timedelta(days=550)).strftime("%Y-%m-%d")
     df = yf.Ticker(ysym).history(start=start)
     if df is None or df.empty:
         raise RuntimeError("yfinance 历史为空")
@@ -132,8 +138,8 @@ def fetch_history(symbol):
     """拉单只股票最近约 1 年日K（前复权）：腾讯 → 新浪 → Yahoo Finance"""
     import akshare as ak
     sym = to_symbol(symbol)
-    start = (date.today() - timedelta(days=500)).strftime("%Y%m%d")
-    end = date.today().strftime("%Y%m%d")
+    start = (today_cn() - timedelta(days=500)).strftime("%Y%m%d")
+    end = today_cn().strftime("%Y%m%d")
     df = None
     try:
         df = ak.stock_zh_a_hist_tx(symbol=sym, start_date=start, end_date=end, adjust="qfq")
@@ -434,7 +440,7 @@ def build_markdown(topn, tencent=None, ind=None, lhb=None, zt=None, prediction=N
                    entry_refs=None):
     lines = []
     lines.append("📊 **每日市场榜单**")
-    lines.append(f"🕐 {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M')}")
+    lines.append(f"🕐 {pd.Timestamp.now(tz='Asia/Shanghai').strftime('%Y-%m-%d %H:%M')}")
     lines.append("")
 
     # 1. 涨幅榜（腾讯 zdf）
