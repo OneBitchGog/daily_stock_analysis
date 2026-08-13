@@ -104,8 +104,32 @@ def to_symbol(code):
     return "bj" + code
 
 
+def fetch_history_yf(symbol):
+    """Yahoo Finance 兜底（国内源全失败时，GitHub Actions 在国外可直连）"""
+    import yfinance as yf
+    code = str(symbol).zfill(6)
+    if code.startswith(("6", "5")):
+        ysym = code + ".SS"
+    elif code.startswith(("0", "3")):
+        ysym = code + ".SZ"
+    else:
+        raise RuntimeError("yfinance 不支持北交所")
+    start = (date.today() - timedelta(days=550)).strftime("%Y-%m-%d")
+    df = yf.Ticker(ysym).history(start=start)
+    if df is None or df.empty:
+        raise RuntimeError("yfinance 历史为空")
+    df = df.reset_index()
+    df = df.rename(
+        columns={
+            "Date": "date", "Open": "open", "Close": "close",
+            "High": "high", "Low": "low", "Volume": "volume",
+        }
+    )
+    return df
+
+
 def fetch_history(symbol):
-    """拉单只股票最近约 1 年日K（前复权），优先腾讯、失败回退新浪（东财 hist 已被封）"""
+    """拉单只股票最近约 1 年日K（前复权）：腾讯 → 新浪 → Yahoo Finance"""
     import akshare as ak
     sym = to_symbol(symbol)
     start = (date.today() - timedelta(days=500)).strftime("%Y%m%d")
@@ -117,9 +141,11 @@ def fetch_history(symbol):
         try:
             df = ak.stock_zh_a_daily(symbol=sym, start_date=start, end_date=end, adjust="qfq")
         except Exception:
-            pass
+            log(f"{symbol} 腾讯/新浪历史K线均失败，尝试 Yahoo Finance")
+            df = fetch_history_yf(symbol)
     if df is None or df.empty:
         raise RuntimeError("历史K线为空")
+    # 统一列名：小写英文 → 中文
     df = df.rename(
         columns={
             "date": "日期", "open": "开盘", "close": "收盘",
