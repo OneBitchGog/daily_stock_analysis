@@ -94,6 +94,145 @@ def fetch_zt_pool():
     raise RuntimeError("涨停池数据为空")
 
 
+def to_symbol(code):
+    """6位数字代码 → 带市场前缀的 symbol（腾讯/新浪用）"""
+    code = str(code).zfill(6)
+    if code.startswith(("6", "5")):
+        return "sh" + code
+    if code.startswith(("0", "3")):
+        return "sz" + code
+    return "bj" + code
+
+
+def fetch_history(symbol):
+    """拉单只股票最近约 1 年日K（前复权），优先腾讯、失败回退新浪（东财 hist 已被封）"""
+    import akshare as ak
+    sym = to_symbol(symbol)
+    start = (date.today() - timedelta(days=500)).strftime("%Y%m%d")
+    end = date.today().strftime("%Y%m%d")
+    df = None
+    try:
+        df = ak.stock_zh_a_hist_tx(symbol=sym, start_date=start, end_date=end, adjust="qfq")
+    except Exception:
+        try:
+            df = ak.stock_zh_a_daily(symbol=sym, start_date=start, end_date=end, adjust="qfq")
+        except Exception:
+            pass
+    if df is None or df.empty:
+        raise RuntimeError("历史K线为空")
+    df = df.rename(
+        columns={
+            "date": "日期", "open": "开盘", "close": "收盘",
+            "high": "最高", "low": "最低", "volume": "成交量",
+        }
+    )
+    for col in ["开盘", "收盘", "最高", "最低", "成交量"]:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+    return df
+
+
+def norm_code(c):
+    """'sz300404'/'sh600519'/'bj...' → 6位纯数字代码"""
+    s = str(c)
+    return "".join(ch for ch in s if ch.isdigit())[-6:] if s else s
+
+
+def get_stock_name(code, zt_df, tencent_df):
+    for df, ck, nk in [(zt_df, "代码", "名称"), (tencent_df, "code", "name")]:
+        if df is not None and ck in df.columns:
+            hit = df[df[ck].astype(str).str.contains(code, na=False)]
+            if not hit.empty:
+                return str(hit.iloc[0][nk])
+    return code
+
+
+def signal_ma250(hist):
+    """回踩年线（简化）：站上年线 + 近5日回踩不破(≥0.97年线) + 量能不放大"""
+    close = hist["收盘"]
+    vol = hist["成交量"]
+    if len(close) < 260 or pd.isna(close.iloc[-1]):
+        return False
+    ma250 = close.rolling(250).mean()
+    today_ma = ma250.iloc[-1]
+    if pd.isna(today_ma):
+        return False
+    if close.iloc[-1] <= today_ma:
+        return False
+    if close.iloc[-5:].min() < today_ma * 0.97:
+        return False
+    avg_vol = vol.iloc[-11:-1].mean()
+    if avg_vol > 0 and vol.iloc[-1] > avg_vol * 1.3:
+        return False  # 放量上涨不算回踩
+    return True
+
+
+def signal_reversal(hist):
+    """反转形态：今日锤头线 / 看涨吞没（近2根K线）"""
+    if len(hist) < 3:
+        return False
+    o, c, h, l = hist["开盘"], hist["收盘"], hist["最高"], hist["最低"]
+    cur = {"开盘": o.iloc[-1], "收盘": c.iloc[-1], "最高": h.iloc[-1], "最低": l.iloc[-1]}
+    prev = {"开盘": o.iloc[-2], "收盘": c.iloc[-2], "最高": h.iloc[-2], "最低": l.iloc[-2]}
+    body = abs(cur["收盘"] - cur["开盘"])
+    upper = cur["最高"] - max(cur["收盘"], cur["开盘"])
+    lower = min(cur["收盘"], cur["开盘"]) - cur["最低"]
+    is_hammer = body > 0 and lower > 2 * body and upper < body
+    is_engulf = (
+        prev["收盘"] < prev["开盘"]
+        and cur["收盘"] > cur["开盘"]
+        and cur["开盘"] <= prev["收盘"]
+        and cur["收盘"] >= prev["开盘"]
+    )
+    return is_hammer or is_engulf
+
+
+def signal_breakout(hist):
+    """放量突破：今日放量(>1.5×5日均量) 且突破前10日高点"""
+    if len(hist) < 20:
+        return False
+    high = hist["最高"]
+    vol = hist["成交量"]
+    close = hist["收盘"]
+    recent_high = high.iloc[-11:-1].max()
+    vol_avg = vol.iloc[-6:-1].mean()
+    return (
+        close.iloc[-1] > recent_high
+        and vol_avg > 0
+        and vol.iloc[-1] > vol_avg * 1.5
+        and close.iloc[-1] > close.iloc[-2]
+    )
+
+
+def scan_signals(zt_df, tencent_df, topn=20, limit=40):
+    """扫描热门股池（涨停池 + 涨幅榜前topn），套用选股信号"""
+    codes = set()
+    if zt_df is not None and "代码" in zt_df.columns:
+        codes |= {norm_code(c) for c in zt_df["代码"]}
+    if tencent_df is not None and "code" in tencent_df.columns:
+        top = tencent_df.nlargest(topn, "zdf")
+        codes |= {norm_code(c) for c in top["code"]}
+    results = []
+    for code in sorted(codes)[:limit]:
+        try:
+            hist = fetch_history(code)
+            if hist is None or len(hist) < 260:
+                continue
+            sigs = []
+            if signal_ma250(hist):
+                sigs.append("回踩年线")
+            if signal_reversal(hist):
+                sigs.append("反转形态")
+            if signal_breakout(hist):
+                sigs.append("放量突破")
+            if sigs:
+                results.append((code, get_stock_name(code, zt_df, tencent_df), sigs))
+        except Exception as e:
+            log(f"{code} 策略扫描失败: {e}")
+            continue
+    return results
+
+
 def fmt_pct(x):
     try:
         return f"{float(x):.2f}%"
@@ -125,7 +264,7 @@ def fmt_billion(x):
         return "-"
 
 
-def build_markdown(topn, tencent=None, ind=None, lhb=None, zt=None, prediction=None):
+def build_markdown(topn, tencent=None, ind=None, lhb=None, zt=None, prediction=None, signals=None):
     lines = []
     lines.append("📊 **每日市场榜单**")
     lines.append(f"🕐 {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M')}")
@@ -231,6 +370,17 @@ def build_markdown(topn, tencent=None, ind=None, lhb=None, zt=None, prediction=N
             lines.append("")
         except Exception as e:
             log(f"涨停池生成失败: {e}")
+
+    # 6.5 策略信号（热门股池：涨停池 + 涨幅榜前20）
+    if signals:
+        lines.append(f"🧠 **今日热门股策略信号**")
+        lines.append("代码 | 名称 | 信号")
+        lines.append("-" * 40)
+        for code, name, sigs in signals:
+            lines.append(f"{code} | {name} | {'、'.join(sigs)}")
+        lines.append("")
+        lines.append("（扫描范围：今日涨停池 + 涨幅榜前20；仅供参考）")
+        lines.append("")
 
     # 7. 明日板块预测
     if prediction:
@@ -352,7 +502,15 @@ def main():
 
     prediction = predict_sectors(ind, api_key, model, topn=15)
 
-    text = build_markdown(topn, tencent, ind, lhb, zt, prediction)
+    # 策略信号扫描（热门股池），耗时约 1-2 分钟
+    signals = []
+    try:
+        signals = scan_signals(zt, tencent, topn=20)
+        log(f"策略信号扫描完成: {len(signals)} 只命中")
+    except Exception as e:
+        log(f"策略信号扫描失败: {e}")
+
+    text = build_markdown(topn, tencent, ind, lhb, zt, prediction, signals)
     print(text)
     print("=" * 60)
 
