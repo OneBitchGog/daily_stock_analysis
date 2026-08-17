@@ -619,6 +619,15 @@ class StockAnalysisPipeline:
                     max_searches=5
                 )
 
+                # 合并 A 股本地直连情报（东财新闻 + 巨潮公告），填补 provider 缺失维度。
+                # 本地直连不依赖搜索 API key，权威日期不经过严格日期过滤。
+                try:
+                    local_intel = self.search_service.search_local_intel(code, stock_name)
+                    if local_intel:
+                        intel_results = self._merge_local_intel(intel_results, local_intel)
+                except Exception as e:
+                    logger.warning(f"{stock_name}({code}) 本地情报合并失败: {e}")
+
                 # 格式化情报报告
                 if intel_results:
                     news_context = self.search_service.format_intel_report(intel_results, stock_name)
@@ -646,6 +655,15 @@ class StockAnalysisPipeline:
                         logger.warning(f"{stock_name}({code}) 保存新闻情报失败: {e}")
             else:
                 logger.info(f"{stock_name}({code}) 搜索服务不可用，跳过情报搜索")
+                # 无搜索 provider 时用本地直连兜底（东财新闻 + 巨潮公告），
+                # 保证无 API key 也能产出个股新闻与公司公告。
+                try:
+                    local_fallback = self._build_local_ashare_intel_fallback(code, stock_name)
+                    if local_fallback:
+                        news_context = local_fallback
+                        logger.info(f"{stock_name}({code}) 本地情报兜底: 已生成个股新闻+公告")
+                except Exception as e:
+                    logger.warning(f"{stock_name}({code}) 本地情报兜底失败: {e}")
 
             # Step 4.5: Social sentiment intelligence (US stocks only)
             if self.social_sentiment_service is not None and self.social_sentiment_service.is_available and is_us_stock_code(code):
@@ -1250,6 +1268,60 @@ class StockAnalysisPipeline:
 
             cache[market] = (top_concepts, bottom_concepts)
             return list(top_concepts), list(bottom_concepts)
+
+    @staticmethod
+    def _merge_local_intel(
+        existing: Dict[str, Any],
+        local: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Merge direct-connect local intel into provider intel.
+
+        Provider results win when non-empty; local fills in missing/empty
+        dimensions only.
+        """
+        merged = dict(existing or {})
+        for dim_name, local_resp in (local or {}).items():
+            existing_resp = merged.get(dim_name)
+            if (
+                existing_resp is not None
+                and getattr(existing_resp, "success", False)
+                and getattr(existing_resp, "results", None)
+            ):
+                continue  # provider already has content for this dimension
+            merged[dim_name] = local_resp
+        return merged
+
+    @staticmethod
+    def _build_local_ashare_intel_fallback(code: str, stock_name: str) -> Optional[str]:
+        """Build a markdown intel context from direct-connect sources when the
+        search service is unavailable (e.g. no search API keys configured)."""
+        from src.services.screening.candidate_context import (
+            fetch_stock_news_items,
+            fetch_stock_announcement_items,
+        )
+
+        lines: List[str] = []
+        try:
+            news_items = fetch_stock_news_items(code, limit=4)
+            if news_items:
+                lines.append(f"### {stock_name}({code}) 个股新闻（东方财富直连）")
+                for item in news_items:
+                    seg = " ".join(v for v in (item.get("date"), item.get("title")) if v)
+                    if seg:
+                        lines.append(f"- {seg}")
+        except Exception as exc:
+            logger.warning("[local_intel] 东财新闻兜底失败 %s: %s", code, exc)
+        try:
+            ann_items = fetch_stock_announcement_items(code, limit=5)
+            if ann_items:
+                lines.append(f"### {stock_name}({code}) 公司公告（巨潮资讯直连）")
+                for item in ann_items:
+                    seg = " ".join(v for v in (item.get("date"), item.get("title")) if v)
+                    if seg:
+                        lines.append(f"- {seg}")
+        except Exception as exc:
+            logger.warning("[local_intel] 巨潮公告兜底失败 %s: %s", code, exc)
+        return "\n".join(lines) if lines else None
 
     def _build_market_structure_context(
         self,

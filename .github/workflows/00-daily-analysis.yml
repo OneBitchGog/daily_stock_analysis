@@ -448,7 +448,8 @@ jobs:
           LOG_LEVEL: INFO
           # 并发分析线程数（多只股票时提速；建议保持低并发防封禁）
           MAX_WORKERS: ${{ vars.MAX_WORKERS || secrets.MAX_WORKERS || '3' }}
-          # 筹码分布：默认 false（云端接口不稳定）；需启用时在 Settings → Variables 添加 ENABLE_CHIP_DISTRIBUTION=true
+          # 筹码分布：默认 false（仅东方财富数据源，云端 push2his 不可达时会 fail-open，
+          # 报告显示"筹码分布数据暂不可用"）；需启用时在 Settings → Variables 添加 ENABLE_CHIP_DISTRIBUTION=true
           ENABLE_CHIP_DISTRIBUTION: ${{ vars.ENABLE_CHIP_DISTRIBUTION || secrets.ENABLE_CHIP_DISTRIBUTION || 'false' }}
           # 实时行情数据源优先级（腾讯有量比且稳定，推荐首选）
           # 可选值: tencent, akshare_sina, efinance, akshare_em, tickflow, tushare

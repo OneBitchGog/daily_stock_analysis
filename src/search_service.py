@@ -4282,6 +4282,79 @@ class SearchService:
             if cache_owner and cache_event is not None:
                 self._release_cache_fill(cache_key, cache_event)
     
+    def search_local_intel(
+        self,
+        stock_code: str,
+        stock_name: str,
+        *,
+        news_limit: int = 4,
+        announcement_limit: int = 5,
+    ) -> Dict[str, SearchResponse]:
+        """Direct-connect A-share intel (East Money news + CNINFO announcements).
+
+        These are structured feeds with authoritative dates, so they bypass the
+        generic search providers and their strict date filtering. Returns {} for
+        non-A-share / index / ETF symbols so callers can merge without noise.
+        """
+        if self._is_foreign_stock(stock_code):
+            return {}
+        try:
+            if self.is_index_or_etf(stock_code, stock_name):
+                return {}
+        except Exception:
+            pass
+
+        from src.services.screening.candidate_context import (
+            fetch_stock_news_items,
+            fetch_stock_announcement_items,
+        )
+
+        results: Dict[str, SearchResponse] = {}
+        news_items: List[Dict[str, Any]] = []
+        try:
+            news_items = fetch_stock_news_items(stock_code, limit=news_limit)
+        except Exception as exc:
+            logger.warning("[local_intel] 东财新闻获取失败 %s: %s", stock_code, exc)
+        results["latest_news"] = SearchResponse(
+            query=f"{stock_name} {stock_code} 个股新闻",
+            results=[
+                SearchResult(
+                    title=item.get("title", ""),
+                    snippet=item.get("snippet") or item.get("title", ""),
+                    url=item.get("url", ""),
+                    source=item.get("source") or "东方财富",
+                    published_date=item.get("date") or None,
+                )
+                for item in news_items
+            ],
+            provider="akshare_em_news",
+            success=bool(news_items),
+            error_message=None if news_items else "无本地新闻",
+        )
+
+        ann_items: List[Dict[str, Any]] = []
+        try:
+            ann_items = fetch_stock_announcement_items(stock_code, limit=announcement_limit)
+        except Exception as exc:
+            logger.warning("[local_intel] 巨潮公告获取失败 %s: %s", stock_code, exc)
+        results["announcements"] = SearchResponse(
+            query=f"{stock_name} {stock_code} 公司公告",
+            results=[
+                SearchResult(
+                    title=item.get("title", ""),
+                    snippet=item.get("title", ""),
+                    url=item.get("url", ""),
+                    source=item.get("source") or "巨潮资讯",
+                    published_date=item.get("date") or None,
+                )
+                for item in ann_items
+            ],
+            provider="cninfo",
+            success=bool(ann_items),
+            error_message=None if ann_items else "无本地公告",
+        )
+        return results
+
     def search_stock_events(
         self,
         stock_code: str,

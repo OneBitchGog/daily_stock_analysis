@@ -209,28 +209,40 @@ def _collect_candidate_context_row(
         return None, [*errors, f"{code} context: {exc}"]
 
 
-def fetch_stock_news_summary(code: str, *, limit: int = 3) -> str:
+def fetch_stock_news_items(code: str, *, limit: int = 5) -> list[dict]:
+    """Fetch East Money news for an A-share stock as structured items."""
     import akshare as ak
 
     df = ak.stock_news_em(symbol=str(code).zfill(6))
     if df is None or df.empty:
-        return ""
+        return []
     items = []
     for _, row in df.head(max(limit, 1)).iterrows():
         title = _first_value(row, ["新闻标题", "标题", "title"])
-        published_at = _first_value(row, ["发布时间", "时间", "date"])
+        if not title:
+            continue
+        date = _first_value(row, ["发布时间", "时间", "date"])
         source = _first_value(row, ["文章来源", "来源", "source"])
-        text = " ".join(item for item in [published_at, source, title] if item)
-        if text:
-            items.append(text)
-    return _compress_text(" | ".join(_dedupe(items)), max_len=520)
+        url = _first_value(row, ["新闻链接", "链接", "url"])
+        snippet = _safe_text(row.get("新闻内容")) if "新闻内容" in row.index else ""
+        items.append(
+            {
+                "title": title,
+                "date": date,
+                "source": source,
+                "url": url,
+                "snippet": _compress_text(snippet, max_len=120),
+            }
+        )
+    return items
 
 
-def fetch_stock_announcement_summary(code: str, *, limit: int = 3) -> str:
+def fetch_stock_announcement_items(code: str, *, limit: int = 5, days: int = 45) -> list[dict]:
+    """Fetch 巨潮(CNINFO) announcements for an A-share stock as structured items."""
     import akshare as ak
 
     end = datetime.now().strftime("%Y%m%d")
-    start = (datetime.now() - timedelta(days=45)).strftime("%Y%m%d")
+    start = (datetime.now() - timedelta(days=max(1, days))).strftime("%Y%m%d")
     df = ak.stock_zh_a_disclosure_report_cninfo(
         symbol=str(code).zfill(6),
         market="沪深京",
@@ -238,14 +250,41 @@ def fetch_stock_announcement_summary(code: str, *, limit: int = 3) -> str:
         end_date=end,
     )
     if df is None or df.empty:
-        return ""
+        return []
     items = []
     for _, row in df.head(max(limit, 1)).iterrows():
         title = _first_value(row, ["公告标题", "标题", "announcementTitle", "title"])
+        if not title:
+            continue
         date = _first_value(row, ["公告时间", "公告日期", "date"])
-        if title:
-            items.append(" ".join(item for item in [date, title] if item))
-    return _compress_text(" | ".join(_dedupe(items)), max_len=520)
+        url = _first_value(row, ["公告链接", "链接", "url"])
+        items.append(
+            {
+                "title": title,
+                "date": date,
+                "source": "巨潮资讯",
+                "url": url,
+                "snippet": "",
+            }
+        )
+    return items
+
+
+def _items_to_summary(items: list[dict], *, max_len: int = 520) -> str:
+    parts = []
+    for item in items:
+        seg = " ".join(v for v in (item.get("date"), item.get("source"), item.get("title")) if v)
+        if seg:
+            parts.append(seg)
+    return _compress_text(" | ".join(_dedupe(parts)), max_len=max_len)
+
+
+def fetch_stock_news_summary(code: str, *, limit: int = 3) -> str:
+    return _items_to_summary(fetch_stock_news_items(code, limit=limit))
+
+
+def fetch_stock_announcement_summary(code: str, *, limit: int = 3) -> str:
+    return _items_to_summary(fetch_stock_announcement_items(code, limit=limit))
 
 
 def fetch_stock_fund_flow_summary(code: str) -> str:

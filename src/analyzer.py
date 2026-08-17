@@ -3837,6 +3837,9 @@ class GeminiAnalyzer:
 | 归母净利润 | {financial_report.get('net_profit_parent', 'N/A')} | |
 | 经营现金流 | {financial_report.get('operating_cash_flow', 'N/A')} | |
 | ROE | {financial_report.get('roe', 'N/A')} | |
+| 毛利率 | {financial_report.get('gross_margin', 'N/A')} | |
+| 每股净资产 | {financial_report.get('bps', 'N/A')} | |
+| 资产负债率 | {financial_report.get('debt_ratio', 'N/A')} | |
 | 近12个月每股现金分红 | {ttm_cash} | 仅现金分红、税前口径 |
 | TTM 股息率 | {ttm_yield} | 公式：近12个月每股现金分红 / 当前价格 × 100% |
 | TTM 分红事件数 | {ttm_count} | |
@@ -3884,13 +3887,19 @@ class GeminiAnalyzer:
                 for item in bottom_sectors[:3]
                 if isinstance(item, dict) and str(item.get("name", "")).strip()
             ) or "N/A"
+            margin_data = stock_flow.get("margin") if isinstance(stock_flow.get("margin"), dict) else {}
             prompt += f"""
 ### 主力资金流向（操作建议过滤器）
 | 指标 | 数值 | 决策含义 |
 |------|------|----------|
-| 主力净流入 | {stock_flow.get('main_net_inflow', 'N/A')} | 正值偏支持，负值偏压制 |
+| 主力净流入 | {stock_flow.get('main_net_inflow_display') or stock_flow.get('main_net_inflow', 'N/A')} | 正值偏支持，负值偏压制 |
+| 主力净占比 | {stock_flow.get('main_net_inflow_pct', 'N/A')} | 主力资金占成交额比例 |
+| 超大单净流入 | {stock_flow.get('super_large_net_inflow_display') or stock_flow.get('super_large_net_inflow', 'N/A')} | 超大单方向参考 |
+| 大单净流入 | {stock_flow.get('large_net_inflow_display') or stock_flow.get('large_net_inflow', 'N/A')} | 大单方向参考 |
+| 小单净流入 | {stock_flow.get('small_net_inflow_display') or stock_flow.get('small_net_inflow', 'N/A')} | 散户方向参考（与主力相反时警惕） |
 | 5日净流入 | {stock_flow.get('inflow_5d', 'N/A')} | 用于判断资金持续性 |
 | 10日净流入 | {stock_flow.get('inflow_10d', 'N/A')} | 用于判断资金持续性 |
+| 融资余额 | {margin_data.get('margin_balance_display', 'N/A')} | 杠杆资金水平 |
 | 资金流入靠前板块 | {top_sector_text} | 板块资金共振参考 |
 | 资金流出靠前板块 | {bottom_sector_text} | 板块风险参考 |
 

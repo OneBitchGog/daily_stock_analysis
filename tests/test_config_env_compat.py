@@ -303,7 +303,10 @@ class ConfigEnvCompatibilityTestCase(unittest.TestCase):
         ):
             config = Config._load_from_env()
 
-        self.assertEqual(config.fundamental_stage_timeout_seconds, 8.0)
+        # Stage budget needs to cover realtime valuation + wide-table finance +
+        # multi-source capital flow + margin detail; 12.0 keeps capital flow
+        # from being starved after the slow valuation fetch.
+        self.assertEqual(config.fundamental_stage_timeout_seconds, 12.0)
         self.assertEqual(config.fundamental_fetch_timeout_seconds, 8.0)
 
     @patch("src.config.setup_env")
